@@ -32,3 +32,10 @@ Example:
   - Adds a minimal display duration before passing point-in-time external events to FullCalendar
   - Preserves the original provider event data for context menus and debugging
 - Google Calendar task descriptions now use mobile-friendly plain text for Obsidian links and display labels for wiki-style project/context links.
+- Persist failed Google Calendar task-event deletions in plugin data and retry them after restart or reconnect, preventing orphaned task events when a task file is deleted while Google cleanup fails or sync is not ready.
+- Track exported Google Calendar task events in plugin data so startup can recover cleanup for task files deleted while Obsidian was closed.
+- Persist Google Calendar task sync requests while Google Calendar is not ready and replay the current task state after reconnect for scheduled, due, or both-date calendar modes.
+- Restore cancelled Google Calendar event tombstones when a task is synced to an existing event ID, so deleted-but-still-addressable events become visible again.
+- Prevent duplicate Google Calendar task events when concurrent syncs race before the newly created event ID reaches Obsidian metadata.
+- Prevent pending intermediate status updates from overwriting completed Google Calendar task events when users quickly cycle a task to done.
+- Mark Google Calendar events as completed when tasks were already done before they became calendar-eligible.
