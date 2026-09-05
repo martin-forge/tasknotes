@@ -1130,7 +1130,8 @@ export class GoogleCalendarService extends CalendarProvider {
 	async deleteEvent(
 		calendarId: string,
 		eventId: string,
-		expectedConnectionGeneration?: number
+		expectedConnectionGeneration?: number,
+		expectedEtag?: string
 	): Promise<void> {
 		// Validate inputs
 		validateCalendarId(calendarId);
@@ -1168,6 +1169,8 @@ export class GoogleCalendarService extends CalendarProvider {
 					throw new Error(
 						"Refusing to delete an unowned, invited or unversioned task projection"
 					);
+				if (expectedEtag && event.etag !== expectedEtag)
+					throw new Error("Task projection changed after deletion was verified");
 				etag = event.etag;
 			}
 

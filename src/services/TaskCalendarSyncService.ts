@@ -829,6 +829,70 @@ export class TaskCalendarSyncService {
 		});
 	}
 
+	/** Require current retirement evidence or a byte-equivalent surviving projection. */
+	private async projectionDeletionVersion(
+		calendarId: string,
+		eventId: string
+	): Promise<string | undefined> {
+		if (!this.plugin.settings.googleCalendarExport.reconcileFromTasks) return undefined;
+		const events = await this.googleCalendarService.listTaskProjections(
+			calendarId,
+			this.plugin.app.vault.getName()
+		);
+		const event = events.find((candidate) => candidate.id === eventId);
+		const owner = event?.extendedProperties?.private;
+		if (
+			!event?.etag ||
+			event.attendees?.length ||
+			owner?.tasknotesProjection !== "1" ||
+			owner.tasknotesVault !== this.plugin.app.vault.getName() ||
+			!owner.tasknotesUid
+		)
+			throw new Error("Cannot verify the task projection proposed for deletion");
+		const { byUid } = await this.readProjectionTasks();
+		const task = byUid.get(owner.tasknotesUid);
+		if (!task)
+			throw new Error("Keeping projection: no readable task with the same stable identity");
+		const occurrence = owner.tasknotesOccurrence;
+		const retiredOccurrence =
+			owner.tasknotesRole === "exception" &&
+			occurrence &&
+			(task.complete_instances?.includes(occurrence) ||
+				task.skipped_instances?.includes(occurrence));
+		if ((task.archived && !this.isTaskCalendarEligible(task)) || retiredOccurrence)
+			return event.etag;
+
+		const survivorId =
+			owner.tasknotesRole === "exception"
+				? this.getTaskExceptionEventId(task)
+				: this.getTaskEventId(task);
+		const survivor = events.find(
+			(candidate) => candidate.id === survivorId && candidate.id !== eventId
+		);
+		// Ignore only provider-generated record metadata. Unknown user fields (for
+		// example attachments) must match too, not just fields TaskNotes writes.
+		const content = (record: TaskProjectionEvent) =>
+			JSON.stringify(
+				Object.entries(record)
+					.filter(
+						([key]) =>
+							![
+								"id",
+								"etag",
+								"created",
+								"updated",
+								"htmlLink",
+								"iCalUID",
+								"sequence",
+							].includes(key)
+					)
+					.sort(([a], [b]) => a.localeCompare(b))
+			);
+		if (survivor && !survivor.attendees?.length && content(survivor) === content(event))
+			return event.etag;
+		throw new Error("Keeping projection: no retirement marker or identical surviving event");
+	}
+
 	private async deleteOrQueueCalendarEvent(
 		taskPath: string,
 		calendarId: string,
@@ -854,10 +918,12 @@ export class TaskCalendarSyncService {
 		try {
 			await this.withGoogleRateLimit(async () => {
 				await this.assertConnectionGenerationCurrent(connectionGeneration);
+				const version = await this.projectionDeletionVersion(calendarId, eventId);
 				return this.googleCalendarService.deleteEvent(
 					calendarId,
 					eventId,
-					connectionGeneration
+					connectionGeneration,
+					...(version ? [version] : [])
 				);
 			});
 			await this.removeFromDeletionQueue(calendarId, eventId);
@@ -1001,26 +1067,37 @@ export class TaskCalendarSyncService {
 		return !!(exception && detached && taskProjectionMatches(exception, detached));
 	}
 
-	/** Rebuild provider state from a complete, readable Markdown cohort. */
-	private async reconcileOwnedTaskProjectionsOnce(): Promise<void> {
-		if (!this.plugin.settings.googleCalendarExport.reconcileFromTasks || !this.isEnabled())
-			return;
-		const calendarId = this.plugin.settings.googleCalendarExport.targetCalendarId;
-		const vaultName = this.plugin.app.vault.getName();
-		const generation = this.getConnectionGeneration();
+	private async readProjectionTasks() {
 		const tasks = await this.plugin.cacheManager.getAllTasks();
-		const byPath = new Map(tasks.map((task) => [task.path, task]));
-		const byUid = new Map<string, TaskInfo | null>();
+		const indexedByPath = new Map(tasks.map((task) => [task.path, task]));
+		const byPath = new Map<string, TaskInfo>();
+		const byUid = new Map<string, TaskInfo>();
 		const uidByPath = new Map<string, string>();
 		// Read every candidate before any remote mutation. Missing metadata or a
 		// duplicated identity must never look like permission to delete an event.
 		for (const file of this.plugin.app.vault.getMarkdownFiles()) {
 			const content = await this.plugin.app.vault.read(file);
 			const header = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content);
-			if (!header || !header[1].includes("tasknotesUid")) continue;
+			if (!header) {
+				if (indexedByPath.has(file.path) || content.includes("tasknotesUid:"))
+					throw new Error(`Unreadable task frontmatter: ${file.path}`);
+				continue;
+			}
+			if (!indexedByPath.has(file.path) && !header[1].includes("tasknotesUid")) continue;
 			const fm = parseYaml(header[1]) as Record<string, unknown> | null;
-			const uid = fm?.tasknotesUid;
-			if (uid === undefined) continue;
+			if (!fm || typeof fm !== "object" || Array.isArray(fm))
+				throw new Error(`Invalid task frontmatter: ${file.path}`);
+			const uid = fm.tasknotesUid;
+			if (uid === undefined) {
+				// A previously projected task must not receive a replacement identity.
+				const indexed = indexedByPath.get(file.path);
+				if (
+					indexed &&
+					(this.getTaskEventId(indexed) || this.getTaskExceptionEventId(indexed))
+				)
+					throw new Error(`Missing stable task identity: ${file.path}`);
+				continue;
+			}
 			if (
 				typeof uid !== "string" ||
 				!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(uid) ||
@@ -1028,7 +1105,7 @@ export class TaskCalendarSyncService {
 			) {
 				throw new Error(`Invalid or duplicated task identity: ${file.path}`);
 			}
-			const indexedTask = byPath.get(file.path);
+			const indexedTask = indexedByPath.get(file.path);
 			if (!indexedTask) throw new Error(`Task identity is not indexed yet: ${file.path}`);
 			const task = {
 				path: file.path,
@@ -1046,6 +1123,17 @@ export class TaskCalendarSyncService {
 			byUid.set(uid, task);
 			uidByPath.set(file.path, uid);
 		}
+		return { byPath, byUid, uidByPath };
+	}
+
+	/** Rebuild provider state without treating a missing task as a retirement. */
+	private async reconcileOwnedTaskProjectionsOnce(): Promise<void> {
+		if (!this.plugin.settings.googleCalendarExport.reconcileFromTasks || !this.isEnabled())
+			return;
+		const calendarId = this.plugin.settings.googleCalendarExport.targetCalendarId;
+		const vaultName = this.plugin.app.vault.getName();
+		const generation = this.getConnectionGeneration();
+		const { byPath, byUid, uidByPath } = await this.readProjectionTasks();
 		const events = await this.googleCalendarService.listTaskProjections(calendarId, vaultName);
 		const byTask = new Map<string, typeof events>();
 		const exceptions = new Map<string, typeof events>();
@@ -1068,7 +1156,18 @@ export class TaskCalendarSyncService {
 			const group = byTask.get(uid) || [];
 			const detached = exceptions.get(uid) || [];
 			const task = byUid.get(uid);
-			if (!task || !this.isTaskCalendarEligible(task)) {
+			if (!task) {
+				tasknotesLogger.warn(
+					"[TaskCalendarSync] Keeping projection without a readable task identity",
+					{
+						category: "provider",
+						operation: "reconcile-task-projections",
+						details: { taskUid: uid },
+					}
+				);
+				continue;
+			}
+			if (!this.isTaskCalendarEligible(task)) {
 				for (const event of [...group, ...detached])
 					await this.deleteOrQueueCalendarEvent(task?.path || "", calendarId, event.id);
 				continue;
@@ -1557,10 +1656,15 @@ export class TaskCalendarSyncService {
 
 					await this.withGoogleRateLimit(async () => {
 						await this.assertConnectionGenerationCurrent(connectionGeneration);
+						const version = await this.projectionDeletionVersion(
+							item.calendarId,
+							item.eventId
+						);
 						return this.googleCalendarService.deleteEvent(
 							item.calendarId,
 							item.eventId,
-							connectionGeneration
+							connectionGeneration,
+							...(version ? [version] : [])
 						);
 					});
 					await this.clearTaskEventIdIfMatching(item, connectionGeneration);

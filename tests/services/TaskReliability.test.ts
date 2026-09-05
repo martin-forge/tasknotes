@@ -1,5 +1,8 @@
 import { requestUrl } from "obsidian";
-import { GoogleCalendarService, taskProjectionMatches } from "../../src/services/GoogleCalendarService";
+import {
+	GoogleCalendarService,
+	taskProjectionMatches,
+} from "../../src/services/GoogleCalendarService";
 import { TaskCalendarSyncService } from "../../src/services/TaskCalendarSyncService";
 
 const UID = "61d3d239-e29c-4295-aac2-a40be5ace641";
@@ -20,7 +23,8 @@ describe("Google Calendar projection recovery", () => {
 				vault: {
 					getName: () => "Example Vault",
 					getMarkdownFiles: () => [file],
-					read: async () => `---\ntasknotesUid: ${UID}\n---\n`,
+					read: async () =>
+						`---\ntasknotesUid: ${UID}\ntags: ${task.archived ? "[archived]" : "[]"}\n---\n`,
 				},
 			},
 			settings: {
@@ -30,8 +34,8 @@ describe("Google Calendar projection recovery", () => {
 					targetCalendarId: "test-calendar",
 				},
 			},
-			fieldMapper: { mapFromFrontmatter: () => ({ ...task }) },
-			cacheManager: { getAllTasks: async () => [task] },
+			fieldMapper: { mapFromFrontmatter: (fm: any) => ({ ...task, archived: Array.isArray(fm.tags) && fm.tags.includes("archived") }) },
+			cacheManager: { getAllTasks: async () => [task], getTaskInfo: async () => task },
 		};
 		const owner = {
 			tasknotesProjection: "1",
@@ -39,7 +43,9 @@ describe("Google Calendar projection recovery", () => {
 			tasknotesUid: UID,
 			tasknotesRole: "series",
 		};
-		const events: any[] = [{ id: "event1", extendedProperties: { private: owner } }];
+		const events: any[] = [
+			{ id: "event1", etag: "v1", extendedProperties: { private: owner } },
+		];
 		const google: any = {
 			listTaskProjections: jest.fn(async () => events),
 			getConnectionGeneration: () => 0,
@@ -71,7 +77,7 @@ describe("Google Calendar projection recovery", () => {
 		expect(service.deleteOrQueueCalendarEvent).not.toHaveBeenCalled();
 	});
 
-	it("repairs a survivor before removing duplicate projections and cleans owned orphans", async () => {
+	it("repairs a survivor before duplicate cleanup and keeps projections with missing sources", async () => {
 		const { service, events, owner } = projectionFixture();
 		events.push(
 			{ id: "duplicate", extendedProperties: { private: owner } },
@@ -80,7 +86,7 @@ describe("Google Calendar projection recovery", () => {
 		);
 		await service.reconcileOwnedTaskProjections();
 		expect(service.deleteOrQueueCalendarEvent.mock.calls.map((call: any[]) => call[2])).toEqual(
-			["duplicate", "orphan"]
+			["duplicate"]
 		);
 		expect(service.syncTaskToCalendar.mock.invocationCallOrder[0]).toBeLessThan(
 			service.deleteOrQueueCalendarEvent.mock.invocationCallOrder[0]
@@ -124,6 +130,116 @@ describe("Google Calendar projection recovery", () => {
 			expect(service.syncTaskToCalendar).not.toHaveBeenCalled();
 		}
 	);
+
+	it.each([
+		"missing source",
+		"missing UUID",
+		"unclosed frontmatter",
+		"invalid YAML",
+		"empty YAML",
+	])("does not infer deletion from %s", async (kind) => {
+		const { plugin, service } = projectionFixture();
+		if (kind === "missing source") plugin.app.vault.getMarkdownFiles = () => [];
+		else
+			plugin.app.vault.read = async () =>
+				({
+					"missing UUID": "---\nstatus: ready\n---\n",
+					"unclosed frontmatter": `---\ntasknotesUid: ${UID}\n`,
+					"invalid YAML": `---\ntasknotesUid: [\n---\n`,
+					"empty YAML": "---\n\n---\n",
+				})[kind];
+		await service.reconcileOwnedTaskProjections().catch(() => {});
+		expect(service.deleteOrQueueCalendarEvent).not.toHaveBeenCalled();
+	});
+
+	function deletionFixture() {
+		const fixture = projectionFixture();
+		const { service, plugin, google } = fixture;
+		plugin.settings.googleCalendarExport.syncOnTaskDelete = true;
+		service.isDeletionQueueReady = () => true;
+		service.withGoogleRateLimit = (fn: any) => fn();
+		service.queueCalendarDeletion = jest.fn(async () => {});
+		service.removeFromDeletionQueue = jest.fn(async () => {});
+		google.deleteEvent = jest.fn(async () => {});
+		delete service.deleteOrQueueCalendarEvent;
+		return fixture;
+	}
+
+	it.each(["immediate", "queued"])(
+		"keeps a damaged source safe through %s deletion",
+		async (route) => {
+			const { service, plugin, task, google } = deletionFixture();
+			plugin.app.vault.read = async () => "---\nstatus: ready\n---\n";
+			const item = {
+				taskPath: task.path,
+				calendarId: "test-calendar",
+				eventId: "event1",
+				attempts: 0,
+				createdAt: 1,
+			};
+			if (route === "immediate") {
+				expect(
+					await service.deleteOrQueueCalendarEvent(task.path, "test-calendar", "event1")
+				).toBe(false);
+				expect(service.queueCalendarDeletion.mock.calls[0][3].message).toMatch(
+					/stable identity/
+				);
+			} else {
+				service.getDeletionQueue = async () => [item];
+				service.mutateDeletionQueue = async (mutate: any) => mutate([item]);
+				const result = await service.processDeletionQueue();
+				expect(result).toEqual({ deleted: 0, failed: 1, remaining: 1 });
+			}
+			expect(google.deleteEvent).not.toHaveBeenCalled();
+		}
+	);
+
+	it("requires a fresh archive tag rather than a cached archived flag", async () => {
+		const { service, plugin, task, google } = deletionFixture();
+		task.archived = true;
+		plugin.app.vault.read = async () => `---\ntasknotesUid: ${UID}\n---\n`;
+		expect(await service.deleteOrQueueCalendarEvent(task.path, "test-calendar", "event1")).toBe(
+			false
+		);
+		expect(google.deleteEvent).not.toHaveBeenCalled();
+	});
+
+	it("deletes only a verified retirement, carrying its provider revision", async () => {
+		const { service, task, google } = deletionFixture();
+		task.archived = true;
+		expect(await service.deleteOrQueueCalendarEvent(task.path, "test-calendar", "event1")).toBe(
+			true
+		);
+		expect(google.deleteEvent).toHaveBeenCalledWith("test-calendar", "event1", 0, "v1");
+	});
+
+	it.each([false, true])(
+		"deletes a duplicate only when all event content matches (changed=%s)",
+		async (changed) => {
+			const { service, task, google, events } = deletionFixture();
+			task.googleCalendarEventId = "survivor";
+			events.push({ ...events[0], id: "survivor", etag: "v2" });
+			if (changed) events[0].attachments = [{ fileUrl: "https://example.com/attachment" }];
+			expect(
+				await service.deleteOrQueueCalendarEvent(task.path, "test-calendar", "event1")
+			).toBe(!changed);
+			expect(google.deleteEvent).toHaveBeenCalledTimes(changed ? 0 : 1);
+		}
+	);
+
+	it("retires a detached occurrence only with an explicit completion or skip marker", async () => {
+		const { service, task, events, google, owner } = deletionFixture();
+		events[0].extendedProperties.private = {
+			...owner,
+			tasknotesRole: "exception",
+			tasknotesOccurrence: "2026-09-06",
+		};
+		task.complete_instances = ["2026-09-06"];
+		expect(await service.deleteOrQueueCalendarEvent(task.path, "test-calendar", "event1")).toBe(
+			true
+		);
+		expect(google.deleteEvent).toHaveBeenCalledTimes(1);
+	});
 
 	it("recovers a detached recurrence event separately from its parent series", async () => {
 		const { task, service, events, owner } = projectionFixture();
@@ -190,6 +306,20 @@ describe("owned provider projection safety", () => {
 		]);
 		expect(url.searchParams.get("pageToken")).toBe("next");
 	});
+
+	it("refuses deletion if the provider changed after retirement was verified", async () => {
+		const service = fixture();
+		(requestUrl as jest.Mock).mockResolvedValue({
+			json: { id: "event1", etag: "changed", extendedProperties: { private: owner } },
+		});
+		await expect(service.deleteEvent("test-calendar", "event1", 0, "verified")).rejects.toThrow(
+			/changed/
+		);
+		expect((requestUrl as jest.Mock).mock.calls.map((call: any[]) => call[0].method)).toEqual([
+			"GET",
+		]);
+	});
+
 	it.each(["invitation", "unowned", "no etag"])(
 		"refuses to delete a changed %s record",
 		async (kind) => {

@@ -34,6 +34,8 @@ When a change has user-facing documentation, include a canonical tasknotes.dev l
 
 ## Fixed
 
+- Keep private task projections when a source is missing, damaged or has lost its task ID. Cleanup now requires a readable retirement marker or an identical surviving event, including on retries.
+
 - (#1849) Fixed context menus stacking on top of each other. Only one menu stays open at a time, and clicking the same indicator again closes its menu. This previously applied to date fields only, and now covers priority, status, recurrence, reminders, task, ICS event, and batch menus.
   - Thanks to @3zra47 for reporting and @YBKF for the contribution.
 
