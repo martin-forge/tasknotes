@@ -47,3 +47,7 @@ When a change has user-facing documentation, include a canonical tasknotes.dev l
 
 - (#2303) Removed the extra space after inline task links on desktop while retaining the task menu on touch devices.
   - Thanks to @nelsonlove for the fix.
+
+## Security
+
+- Require an API token before starting local API/MCP listeners, and validate one-use OAuth callbacks on an OS-assigned loopback port without reflecting callback text into HTML.
