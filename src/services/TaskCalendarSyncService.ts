@@ -839,7 +839,8 @@ export class TaskCalendarSyncService {
 			calendarId,
 			this.plugin.app.vault.getName()
 		);
-		const event = events.find((candidate) => candidate.id === eventId);
+		const event = events.find((candidate) => candidate.id === eventId) ||
+			await this.googleCalendarService.readTaskProjection(calendarId, eventId);
 		const owner = event?.extendedProperties?.private;
 		if (
 			!event?.etag ||

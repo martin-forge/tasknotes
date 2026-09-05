@@ -194,6 +194,25 @@ describe("Google Calendar projection recovery", () => {
 		}
 	);
 
+
+	it.each([404, 410])("settles an already deleted projection after a direct provider read (%s)", async (status) => {
+		const { service, task, google, events } = deletionFixture();
+		events.length = 0;
+		google.readTaskProjection = jest.fn(async () => { throw Object.assign(new Error("Gone"), { status }); });
+		expect(await service.deleteOrQueueCalendarEvent(task.path, "test-calendar", "event1")).toBe(true);
+		expect(google.readTaskProjection).toHaveBeenCalledWith("test-calendar", "event1");
+		expect(google.deleteEvent).not.toHaveBeenCalled();
+		expect(service.queueCalendarDeletion).not.toHaveBeenCalled();
+	});
+
+	it("keeps an unmarked event absent from the filtered listing", async () => {
+		const { service, task, google, events } = deletionFixture();
+		events.length = 0;
+		google.readTaskProjection = jest.fn(async () => ({ id: "event1", etag: "v1" }));
+		expect(await service.deleteOrQueueCalendarEvent(task.path, "test-calendar", "event1")).toBe(false);
+		expect(google.deleteEvent).not.toHaveBeenCalled();
+	});
+
 	it("requires a fresh archive tag rather than a cached archived flag", async () => {
 		const { service, plugin, task, google } = deletionFixture();
 		task.archived = true;

@@ -1124,6 +1124,21 @@ export class GoogleCalendarService extends CalendarProvider {
 		}
 	}
 
+	/** Read an event directly; absence from the filtered projection list is not proof it is gone. */
+	async readTaskProjection(calendarId: string, eventId: string, expectedConnectionGeneration?: number): Promise<TaskProjectionEvent> {
+		validateCalendarId(calendarId);
+		validateEventId(eventId);
+		const token = await this.oauthService.getValidToken("google", expectedConnectionGeneration);
+		const response = await this.withRetry(() => requestUrl({
+			url: `${this.baseUrl}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
+			method: "GET",
+			headers: { Authorization: `Bearer ${token}` },
+		}), "Read task projection");
+		const event = response.json as TaskProjectionEvent;
+		if (event?.status === "cancelled") throw new EventNotFoundError(eventId);
+		return event;
+	}
+
 	/**
 	 * Deletes a Google Calendar event
 	 */
@@ -1148,16 +1163,7 @@ export class GoogleCalendarService extends CalendarProvider {
 				this.plugin.settings.googleCalendarExport.reconcileFromTasks &&
 				calendarId === this.plugin.settings.googleCalendarExport.targetCalendarId
 			) {
-				const response = await this.withRetry(
-					() =>
-						requestUrl({
-							url: `${this.baseUrl}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`,
-							method: "GET",
-							headers: { Authorization: `Bearer ${token}` },
-						}),
-					"Read task projection before deletion"
-				);
-				const event = response.json as TaskProjectionEvent;
+				const event = await this.readTaskProjection(calendarId, eventId, expectedConnectionGeneration);
 				const owner = event.extendedProperties?.private;
 				if (
 					event.attendees?.length ||
