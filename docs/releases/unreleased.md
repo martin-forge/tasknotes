@@ -34,6 +34,11 @@ When a change has user-facing documentation, include a canonical tasknotes.dev l
 
 ## Fixed
 
+- (#2309) Fixed Google calendars enabled through the `primary` alias falling back to the
+  default blue instead of their own calendar color. The alias now also resolves for the
+  calendar's visibility toggle, which previously matched nothing, and for the calendar name
+  shown on mini calendar entries and event-linked notes.
+
 - (#1849) Fixed context menus stacking on top of each other. Only one menu stays open at a time, and clicking the same indicator again closes its menu. This previously applied to date fields only, and now covers priority, status, recurrence, reminders, task, ICS event, and batch menus.
   - Thanks to @3zra47 for reporting and @YBKF for the contribution.
 
