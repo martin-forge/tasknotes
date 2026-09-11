@@ -14,6 +14,7 @@ import {
 } from "../../../src/bases/calendar-core";
 import type TaskNotesPlugin from "../../../src/main";
 import { TaskFactory } from "../../helpers/mock-factories";
+import { createTaskInfoFromBasesData } from "../../../src/bases/helpers";
 
 function createPlugin(): TaskNotesPlugin {
 	return {
@@ -50,6 +51,22 @@ describe("Issue #1603: recurring calendar instance visibility", () => {
 		);
 		expect(getInstanceDates(events)).toEqual(["2026-09-11", "2026-09-19"]);
 		expect(JSON.stringify(task)).toBe(before);
+	});
+
+	it("preserves move markers through Bases conversion before the task cache is warm", () => {
+		const task = createTaskInfoFromBasesData({
+			path: "tasks/moved.md",
+			properties: {
+				recurrence: "DTSTART:20260905;FREQ=WEEKLY;BYDAY=SA",
+				scheduled: "2026-09-11",
+				googleCalendarExceptionOriginalScheduled: "2026-09-12",
+				googleCalendarMovedOriginalDates: ["2026-09-05"],
+			},
+		});
+		expect(task).not.toBeNull();
+		expect(getInstanceDates(generateRecurringTaskInstances(
+			task!, new Date("2026-09-01T00:00:00Z"), new Date("2026-09-21T00:00:00Z"), plugin
+		))).toEqual(["2026-09-11", "2026-09-19"]);
 	});
 
 	it("keeps recorded history for moved dates when history is requested", () => {
