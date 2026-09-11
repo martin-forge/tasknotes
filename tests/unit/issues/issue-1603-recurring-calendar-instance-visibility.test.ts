@@ -35,6 +35,43 @@ describe("Issue #1603: recurring calendar instance visibility", () => {
 	const start = new Date("2026-02-01T00:00:00.000Z");
 	const end = new Date("2026-02-06T00:00:00.000Z");
 
+	it("renders a moved occurrence once and keeps later weekly occurrences", () => {
+		const task = TaskFactory.createRecurringTask("DTSTART:20260905;FREQ=WEEKLY;BYDAY=SA", {
+			scheduled: "2026-09-11",
+			googleCalendarExceptionOriginalScheduled: "2026-09-12",
+			googleCalendarMovedOriginalDates: ["2026-09-05"],
+		});
+		const before = JSON.stringify(task);
+		const events = generateRecurringTaskInstances(
+			task,
+			new Date("2026-09-01T00:00:00Z"),
+			new Date("2026-09-21T00:00:00Z"),
+			plugin
+		);
+		expect(getInstanceDates(events)).toEqual(["2026-09-11", "2026-09-19"]);
+		expect(JSON.stringify(task)).toBe(before);
+	});
+
+	it("keeps recorded history for moved dates when history is requested", () => {
+		const task = TaskFactory.createRecurringTask("DTSTART:20260905;FREQ=WEEKLY;BYDAY=SA", {
+			scheduled: "2026-09-19",
+			googleCalendarMovedOriginalDates: ["2026-09-12"],
+			complete_instances: ["2026-09-12"],
+		});
+		const range = [new Date("2026-09-11T00:00:00Z"), new Date("2026-09-21T00:00:00Z")] as const;
+		expect(getInstanceDates(generateRecurringTaskInstances(task, ...range, plugin))).toEqual([
+			"2026-09-12",
+			"2026-09-19",
+		]);
+		expect(
+			getInstanceDates(
+				generateRecurringTaskInstances(task, ...range, plugin, {
+					showCompletedRecurringInstances: false,
+				})
+			)
+		).toEqual(["2026-09-19"]);
+	});
+
 	it("keeps completed and skipped recurring instances visible by default", () => {
 		const task = TaskFactory.createRecurringTask("FREQ=DAILY;INTERVAL=1", {
 			path: "tasks/recur.md",
